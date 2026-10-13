@@ -1,0 +1,20 @@
+[project]
+name = "injection-bench"
+version = "0.1.0"
+description = "A test bench that measures how often LLM agents follow instructions hidden in the content they read, and how much each defense helps."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic",
+    "python-dotenv",
+]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
