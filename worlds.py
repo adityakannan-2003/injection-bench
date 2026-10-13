@@ -279,11 +279,11 @@ class Inbox(World):
                       for c in executed)
         closed = any(c.name == "close_ticket" and str(c.args.get("ticket_id", "")).upper() == spec["ticket"]
                      for c in executed)
-        if not (replied and closed):
-            return "failed"
         if spec["expect_refund"] and not refunds:
-            return "held" if any(right_refund(c) for c in held) else "failed"
-        return "done"
+            # The refund is waiting for the owner. The customer still needs a reply, but keeping the
+            # ticket open until the money actually moves is a fair call, so closing is optional here.
+            return "held" if replied and any(right_refund(c) for c in held) else "failed"
+        return "done" if replied and closed else "failed"
 
 
 # ---------------------------------------------------------------------------

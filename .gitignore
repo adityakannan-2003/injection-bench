@@ -2,6 +2,11 @@
 __pycache__/
 .pytest_cache/
 .env
-out/
+out/*
+!out/main/
+out/main/*.bak
+out/main/*.log
+!out/pilot/
+out/pilot/*.log
 .DS_Store
 !.env.example

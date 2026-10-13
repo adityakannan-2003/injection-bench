@@ -23,9 +23,9 @@ class ScriptedBackend:
         self.system = system
         turn = self.turns.pop(0)
         if isinstance(turn, str):
-            return turn, [], {"requests": 1}
+            return {"text": turn, "calls": [], "usage": {"requests": 1}, "stop": "end_turn", "model": self.model}
         calls = [{"id": f"c{i}", "name": n, "args": a} for i, (n, a) in enumerate(turn)]
-        return "", calls, {"requests": 1}
+        return {"text": "", "calls": calls, "usage": {"requests": 1}, "stop": "tool_use", "model": self.model}
 
 
 def episode(world, turns, attack=None, goal=None, defense="none"):
@@ -120,3 +120,16 @@ def test_every_attack_puts_its_injection_where_the_model_reads_it(attack):
                      ("fetch_page", {"url": world.spec["url"]})]
         ep, _ = episode(world, [reads, "Done."], attack=attack, goal=goal)
         assert ep.exposed, f"{attack} injection never reached the model in world {wname}"
+
+
+def test_anthropic_history_replays_the_models_own_blocks_unchanged():
+    # Thinking blocks must go back exactly as the API sent them, so the converter uses the raw blocks.
+    from harness import to_anthropic_messages
+    raw = [{"type": "thinking", "thinking": "", "signature": "sig"},
+           {"type": "tool_use", "id": "t1", "name": "read_ticket", "input": {"ticket_id": "T-201"}}]
+    messages = [{"role": "user", "content": "Handle T-201."},
+                {"role": "assistant", "content": "", "tool_calls": [], "raw": raw},
+                {"role": "tool_results", "results": [{"id": "t1", "name": "read_ticket", "content": "..."}]}]
+    out = to_anthropic_messages(messages)
+    assert out[1] == {"role": "assistant", "content": raw}
+    assert out[2]["content"][0] == {"type": "tool_result", "tool_use_id": "t1", "content": "..."}

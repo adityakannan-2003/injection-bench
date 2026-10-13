@@ -42,6 +42,8 @@ class Episode:
     emitted: list = field(default_factory=list)   # [{name, args}] every call the model made
     final_text: str = ""
     error: str = ""
+    stops: list = field(default_factory=list)     # why each request ended: tool_use, end_turn, refusal...
+    served: list = field(default_factory=list)    # which model actually answered each request
     usage: dict = field(default_factory=dict)
     latency_s: float = 0.0
 
@@ -70,9 +72,13 @@ def run_episode(world: World, attack: Attack | None, goal: str | None, defense: 
     try:
         for _ in range(max_rounds):
             ep.rounds += 1
-            text, calls, usage = backend.chat(system, messages, world.tools)
+            reply = backend.chat(system, messages, world.tools)
+            text, calls, usage = reply["text"], reply["calls"], reply["usage"]
             add_usage(ep.usage, usage)
-            assistant = {"role": "assistant", "content": text or "", "tool_calls": calls}
+            ep.stops.append(reply.get("stop", ""))
+            ep.served.append(reply.get("model", backend.model))
+            # raw keeps the provider's own blocks (thinking included), which must go back unchanged.
+            assistant = {"role": "assistant", "content": text or "", "tool_calls": calls, "raw": reply.get("raw")}
             messages.append(assistant)
             if not calls:
                 ep.final_text = text or ""
@@ -134,6 +140,8 @@ def to_anthropic_messages(messages: list[dict]) -> list[dict]:
     for m in messages:
         if m["role"] == "user":
             out.append({"role": "user", "content": m["content"]})
+        elif m["role"] == "assistant" and m.get("raw") is not None:
+            out.append({"role": "assistant", "content": m["raw"]})
         elif m["role"] == "assistant":
             content = []
             if m.get("content"):
@@ -148,7 +156,7 @@ def to_anthropic_messages(messages: list[dict]) -> list[dict]:
 
 
 class AnthropicBackend:
-    def __init__(self, model: str, client=None, max_tokens: int = 2048):
+    def __init__(self, model: str, client=None, max_tokens: int = 16000):
         import anthropic
 
         self.model = model
@@ -168,11 +176,14 @@ class AnthropicBackend:
             raise BackendError(str(exc)) from exc
         text = "".join(b.text for b in resp.content if b.type == "text")
         calls = [{"id": b.id, "name": b.name, "args": b.input} for b in resp.content if b.type == "tool_use"]
+        if resp.stop_reason == "max_tokens":
+            calls = []  # a tool call cut off mid-stream can parse as valid-looking input; don't run it
         u = resp.usage
         usage = {"input_tokens": u.input_tokens, "output_tokens": u.output_tokens,
                  "cache_read_input_tokens": getattr(u, "cache_read_input_tokens", 0) or 0,
                  "requests": 1}
-        return text, calls, usage
+        return {"text": text, "calls": calls, "usage": usage, "stop": resp.stop_reason,
+                "model": resp.model, "raw": resp.content}
 
 
 def to_ollama_tools(tools: list[dict]) -> list[dict]:
@@ -239,7 +250,8 @@ class OllamaBackend:
                           "args": args if isinstance(args, dict) else {}})
         usage = {"input_tokens": data.get("prompt_eval_count", 0), "output_tokens": data.get("eval_count", 0),
                  "requests": 1}
-        return text, calls, usage
+        return {"text": text, "calls": calls, "usage": usage, "stop": data.get("done_reason", ""),
+                "model": self.model, "raw": None}
 
 
 def _read_error(exc) -> str:

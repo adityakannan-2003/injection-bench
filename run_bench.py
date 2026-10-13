@@ -75,6 +75,9 @@ def run_one(cfg, model, rep, backend):
     goal = cfg["goal"] or None
     ep = run_episode(world, attack, goal, DEFENSES_BY_NAME[cfg["defense"]], backend)
     row = ep.to_row()
+    if not row["error"] and any(m != model for m in row["served"]):
+        # Never score a run another model answered (for example after a server-side fallback).
+        row["error"] = f"served_model_mismatch: asked for {model}, served by {sorted(set(row['served']))}"
     row["rep"] = rep
     row["kind"] = cfg["kind"]
     return row
@@ -171,6 +174,7 @@ def main() -> None:
     parser.add_argument("--concurrency", type=int, default=4, help="Parallel episodes (set 1 for --local).")
     parser.add_argument("--limit", type=int, help="Stop after this many new runs (for a pilot).")
     parser.add_argument("--summary", action="store_true", help="Only print the summary of saved results.")
+    parser.add_argument("--max-cost", type=float, help="Stop starting new runs once this label's API spend reaches this many dollars.")
     args = parser.parse_args()
 
     load_dotenv(ROOT / ".env")
@@ -193,7 +197,7 @@ def main() -> None:
     if args.clean or args.only_clean:
         configs += list(clean_configs(defenses))
 
-    done = {tuple(r["key"]) for r in existing if "key" in r}
+    done = {tuple(r["key"]) for r in existing if "key" in r and not r.get("error")}  # errored runs get retried
     todo = []
     for cfg in configs:
         for model in models:
@@ -219,10 +223,18 @@ def main() -> None:
         row["key"] = list(key)
         return row
 
+    spent = sum(c for c in (cost_of(r) for r in existing) if c)
     pool = ThreadPoolExecutor(concurrency)
-    pending = {pool.submit(task, item): item for item in todo}
+    queue = list(todo)
+    pending = {}
     finished = 0
-    while pending:
+    stopped = False
+    while queue or pending:
+        while queue and len(pending) < concurrency and not stopped:
+            item = queue.pop(0)
+            pending[pool.submit(task, item)] = item
+        if not pending:
+            break
         done_set, _ = wait(pending, timeout=5, return_when=FIRST_COMPLETED)
         for fut in done_set:
             item = pending.pop(fut)
@@ -234,7 +246,12 @@ def main() -> None:
                        "goal": cfg["goal"], "attack": cfg["attack"], "defense": cfg["defense"], "model": model,
                        "rep": rep, "error": f"runner: {type(exc).__name__}: {exc}"}
             append_jsonl(results_path, row)
+            spent += cost_of(row) or 0
             finished += 1
+            if args.max_cost and spent >= args.max_cost and not stopped:
+                stopped = True
+                print(f"  Spend reached ${spent:.2f} (cap ${args.max_cost:.2f}): finishing the runs in progress, "
+                      f"starting no more. {len(queue)} runs left undone.")
             mark = "ERR " if row.get("error") else ("HARM" if row.get("harm") else ("obey" if row.get("obeyed") else "ok  "))
             label = f"{cfg['world']}/{cfg['goal'] or cfg['scenario']}/{cfg['attack']}/{cfg['defense']}"
             print(f"  [{finished}/{len(todo)}] {mark} {model} {label}")
